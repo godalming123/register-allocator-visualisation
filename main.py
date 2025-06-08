@@ -2,14 +2,16 @@
 # - Keep track of:
 #   - Which value in each register allocation table is the biggest
 #   - Which value in each row is the biggest (excluding the biggest value in the table)
-# - Partially done: Update the register prioraties for other tables when a register is allocated in one table
+# - Stop the variable links from overlapping each other
 # - Show a detailed example of allocating registers with all of the known cases where getting the ideal allocations is hard
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import manim
 from manim.typing import Point3D
-from typing import Tuple, Mapping, TypeAlias, TypeVar, Any, Type
+from typing import Mapping, TypeAlias, TypeVar, Any, Type, Self, Tuple
+import copy
+import math
 from collections.abc import Callable
 
 number_of_registers = 4
@@ -25,19 +27,22 @@ class variableLink:
     strength: int
     arrow: manim.LabeledArrow
 
-registerPrioraties: TypeAlias = Tuple[int, int, int, int, int]
+registerPrioraties: TypeAlias = list[int]
 
 @(dataclass)
 class registerPrioratiesAndLinks:
     links: list[variableLink]
-    prioraties: registerPrioraties = (0, 0, 0, 0, 0)
+    prioraties: registerPrioraties = field(default_factory=lambda: [0,0,0,0,0])
 
 @(dataclass)
 class registerAllocationTable():
     data: Mapping[str, registerPrioratiesAndLinks]
     backingTable: manim.Table
 
-def tupleOfIntsToListOfVMobjects(tuple: Tuple[int, ...]) -> list[manim.VMobject]:
+t = TypeVar("t")
+sequence: TypeAlias = list[t] | tuple[t, ...]
+
+def intsToListOfVMobjects(tuple: sequence[int]) -> list[manim.VMobject]:
     return [manim.Text(str(val)) for val in tuple]
 
 def generateRegisterAllocationTable(*variables: str) -> registerAllocationTable:
@@ -47,7 +52,7 @@ def generateRegisterAllocationTable(*variables: str) -> registerAllocationTable:
     return registerAllocationTable(
         data,
         manim.MobjectTable(
-            [tupleOfIntsToListOfVMobjects(val.prioraties) for val in data.values()],
+            [intsToListOfVMobjects(val.prioraties) for val in data.values()],
             col_labels=[manim.Text(f"r{i}") for i in range(number_of_registers)] + [manim.Text("Unkown")],
             row_labels=[manim.Text(key) for key in data.keys()],
         ),
@@ -58,14 +63,71 @@ class registerAllocationGraph:
     tables: list[registerAllocationTable]
     scene: manim.Scene
 
+t = TypeVar("t")
+def iterateToSolution(goal: float, min: int, max: int, func: Callable[[int], Tuple[float, t]]) -> Tuple[float, t]:
+    input = math.ceil((min+max)/2)
+    while True:
+        value, output = func(input)
+        if value > goal:
+            max = input
+        else:
+            min = input
+        newInput = math.ceil((min+max)/2)
+        if input == newInput:
+            return input, output
+        input = newInput
+
+def arrangeInGrid(targetWidth: float, targetHeight: float, padding: float, *elems: manim.Mobject):
+    # Find the ideal number columns to be as close to the target aspect ratio as possible
+    targetAspectRatio = targetWidth/targetHeight
+    def calculateAspectRatio(numberOfColumns: int) -> Tuple[float, Tuple[float, float, list[float], list[float]]]:
+        numberOfRows = math.ceil(len(elems)/numberOfColumns)
+        columnWidths = [0.0] * numberOfColumns
+        rowHeights = [0.0] * numberOfRows
+        for i, elem in enumerate(elems):
+            x = i % numberOfColumns
+            y = math.floor(i / numberOfColumns)
+            if elem.height > rowHeights[y]:
+                rowHeights[y] = elem.height
+            if elem.width > columnWidths[x]:
+                columnWidths[x] = elem.width
+        width = padding*(numberOfColumns-1)
+        height = padding*(numberOfRows-1)
+        for i in range(0, numberOfColumns):
+            width += columnWidths[i]
+        for i in range(0, numberOfRows):
+            height += rowHeights[i]
+        return width / height, (width, height, columnWidths, rowHeights)
+    _, (width, height, columnWidths, rowHeights) = iterateToSolution(targetAspectRatio, 0, len(elems), calculateAspectRatio)
+
+    # Expand or shrink the grid so it fits within `width` and `height`
+    if height * targetAspectRatio > width:
+        scale = targetHeight / height
+    else:
+        scale = targetWidth / width
+
+    # Get the centers of every element in the table based on the column and row sizes
+    y = height/2
+    elementCenters: list[Tuple[float, float, float]] = []
+    for rowHeight in rowHeights:
+        x = -width/2
+        for columnWidth in columnWidths:
+            elementCenters += [((x+columnWidth/2)*scale, (y - rowHeight/2)*scale, 0)]
+            x += columnWidth + padding
+        y -= rowHeight + padding
+
+    # Position every element in the table according to their center
+    for center, elem in zip(elementCenters, elems):
+        elem.scale(scale)
+        elem.move_to(center)
+
 def generateRegisterAllocationGraph(scene: manim.Scene, *varNamesList: list[str]) -> registerAllocationGraph:
     out = registerAllocationGraph(
         [generateRegisterAllocationTable(*varNames) for varNames in varNamesList],
         scene,
     )
-    tablesGroup = manim.Group(*[t.backingTable for t in out.tables])
-    tablesGroup.scale(0.3)
-    tablesGroup.arrange_in_grid(buff=1)
+    padding = 0.5
+    arrangeInGrid(out.scene.camera.frame_width-padding, out.scene.camera.frame_height-padding, padding, *[t.backingTable for t in out.tables])
     out.scene.play(manim.LaggedStart(
         *[manim.FadeIn(table.backingTable) for table in out.tables],
         lag_ratio=0.5,
@@ -80,14 +142,58 @@ def getRowFromVarRef(graph: registerAllocationGraph, varRef: variableReference) 
 def getColFromRegister(table: registerAllocationTable, register: int) -> manim.VMobject:
     return table.backingTable.get_columns().submobjects[register+1]
 
-def getCellFromVarRefAndRegister(graph: registerAllocationGraph, varRef: variableReference, register: int) -> manim.Text:
-    row, _ = getRowFromVarRef(graph, varRef)
-    return convertToType(row[register+1], manim.Text)
+manimText: TypeAlias = manim.Text | manim.MathTex | manim.Tex
 
-T = TypeVar('T')
-def convertToType(instance: Any, target_type: Type[T]) -> T:
-    assert isinstance(instance, target_type)
+@(dataclass)
+class number:
+    backingMobject: manimText
+    value: int
+    def copy(self) -> Self:
+        return copy.deepcopy(self)
+
+def getCellFromVarRefAndRegister(graph: registerAllocationGraph, varRef: variableReference, register: int) -> number:
+    row, rowData = getRowFromVarRef(graph, varRef)
+    return number(convertToType(row[register+1], manim.Text), rowData.prioraties[register])
+
+t = TypeVar('t')
+def convertToType(instance: Any, target_type: Type[t]) -> t:
+    if not isinstance(instance, target_type):
+        raise AssertionError("Expected ", target_type, "got type", instance)
     return instance
+
+def addToTableCell(
+    graph: registerAllocationGraph,
+    varRef: variableReference,
+    register: int,
+    added: number,
+):
+    cell = getCellFromVarRefAndRegister(graph, varRef, register)
+
+    # Animation 1
+    cellTarget = cell.backingMobject.copy()
+    operation = manim.Text("+" if added.value >= 0 else "-", font_size=cell.backingMobject.font_size)
+    valueTarget = added.backingMobject.copy()
+    valueTarget.height = cell.backingMobject.height
+    rowItems = [cellTarget, operation, valueTarget]
+    arrangeInRow(cell.backingMobject.get_center(), 0.02, *rowItems)
+    graph.scene.play(manim.AnimationGroup(
+        manim.ReplacementTransform(cell.backingMobject, cellTarget),
+        manim.ReplacementTransform(added.backingMobject, valueTarget),
+        manim.Create(operation),
+    ))
+
+    # Animation 2
+    group = manim.Group(*rowItems)
+    resultMobject = manim.Text(str(cell.value+added.value), font_size=cell.backingMobject.font_size)
+    resultMobject.move_to(group.get_center())
+    graph.scene.play(manim.ReplacementTransform(group, resultMobject))
+
+    # Update the prioraty in the table cell
+    graph.tables[varRef.indexOfRegisterAllocationTable].data[varRef.nameOfVariableWithinTable].prioraties[register] += added.value
+
+    # Update the mobject in the table cell
+    referencedVariableIndex = list(graph.tables[varRef.indexOfRegisterAllocationTable].data.keys()).index(varRef.nameOfVariableWithinTable)
+    graph.tables[varRef.indexOfRegisterAllocationTable].backingTable.mob_table[referencedVariableIndex+1][register+1] = resultMobject
 
 def createLink(fromVar: variableReference, toVar: variableReference, strength: int) -> Callable[[registerAllocationGraph], registerAllocationGraph]:
     def createLinkFunc(graph: registerAllocationGraph) -> registerAllocationGraph:
@@ -99,6 +205,9 @@ def createLink(fromVar: variableReference, toVar: variableReference, strength: i
         graph.tables[fromVar.indexOfRegisterAllocationTable].data[fromVar.nameOfVariableWithinTable].links.append(fromLink)
         graph.tables[toVar.indexOfRegisterAllocationTable].data[toVar.nameOfVariableWithinTable].links.append(toLink)
         graph.scene.play(manim.Create(arrow))
+        added = number(arrow.label.rendered_label, strength)
+        addToTableCell(graph, fromVar, number_of_registers, added.copy())
+        addToTableCell(graph, toVar, number_of_registers, added.copy())
         return graph
     return createLinkFunc
 
@@ -136,15 +245,15 @@ def filter(l: list[a], func: Callable[[a], bool]) -> list[a]:
         removed += 1
     return l
 
-def arrangeInRow(centerX: float, centerY: float, padding: float, *elements: manim.Mobject):
+def arrangeInRow(center: Point3D, padding: float, *elements: manim.Mobject):
     totalWidth = -padding
     for elem in elements:
         totalWidth += elem.width + padding
-    currentPos = centerX - totalWidth/2
+    currentPos = center
+    currentPos[0] -= totalWidth/2
     for elem in elements:
-        set_left(elem, currentPos)
-        elem.set_y(centerY)
-        currentPos += elem.width + padding
+        elem.move_to(currentPos, manim.LEFT)
+        currentPos[0] += elem.width + padding
 
 def allocateRegisterToVariable(var: variableReference, register: int) -> Callable[[registerAllocationGraph], registerAllocationGraph]:
     def allocateRegisterToVariableFunc(graph: registerAllocationGraph) -> registerAllocationGraph:
@@ -158,31 +267,21 @@ def allocateRegisterToVariable(var: variableReference, register: int) -> Callabl
         set_left(regTarget, x(align_to.get_right()))
         regTarget.set_y(y(align_to.get_bottom()))
         col = getColFromRegister(table, register)
-        moveArrowStrengthsToRegisterPrioratiesAnimations: list[manim.Animation] = []
+        graph.scene.play(manim.AnimationGroup(
+            manim.ReplacementTransform(reg, regTarget),
+            crossoutMobjectsAnimation(*row.submobjects[1:]),
+            crossoutMobjectsAnimation(*col.submobjects[0:]),
+        ))
         for link in rowData.links:
-            tableCell = getCellFromVarRefAndRegister(graph, link.variable, register)
-            tableCellTarget = tableCell.copy()
-            plusSign = manim.Text("+", font_size=tableCell.font_size)
-            newStrengthLabel = manim.Text(str(link.strength), font_size=tableCell.font_size)
-            graph.scene.remove(link.arrow.label.rendered_label)
-            arrangeInRow(tableCell.get_x(), tableCell.get_y(), 0.02, tableCellTarget, plusSign, newStrengthLabel)
-            moveArrowStrengthsToRegisterPrioratiesAnimations += [
-                manim.Transform(link.arrow.label.rendered_label.copy(), newStrengthLabel),
-                manim.Transform(tableCell, tableCellTarget),
-                manim.Create(plusSign),
-                manim.Uncreate(link.arrow),
-            ]
+            label = link.arrow.label.rendered_label
+            addToTableCell(graph, link.variable, register, number(label.copy(), link.strength))
+            addToTableCell(graph, link.variable, number_of_registers, number(label.copy(), -link.strength))
+            graph.scene.play(manim.Uncreate(link.arrow))
             graph.tables[link.variable.indexOfRegisterAllocationTable].data[link.variable.nameOfVariableWithinTable].links = filter(
                 graph.tables[link.variable.indexOfRegisterAllocationTable].data[link.variable.nameOfVariableWithinTable].links,
                 lambda link: link.variable == var,
             )
-        rowData.links = []
-        graph.scene.play(manim.AnimationGroup(
-            *moveArrowStrengthsToRegisterPrioratiesAnimations,
-            manim.Transform(reg, regTarget),
-            crossoutMobjectsAnimation(*row.submobjects[1:]),
-            crossoutMobjectsAnimation(*col.submobjects[0:]),
-        ))
+        graph.tables[var.indexOfRegisterAllocationTable].data[var.nameOfVariableWithinTable].links = []
         return graph
     return allocateRegisterToVariableFunc
 
