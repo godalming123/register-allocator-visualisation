@@ -25,7 +25,7 @@ class variableReference:
 class variableLink:
     variable: variableReference
     strength: int
-    arrow: manim.LabeledArrow
+    arrow: manim.LabeledLine
 
 registerPrioraties: TypeAlias = list[int]
 
@@ -42,8 +42,16 @@ class registerAllocationTable():
 t = TypeVar("t")
 sequence: TypeAlias = list[t] | tuple[t, ...]
 
+manimText: TypeAlias = manim.Text | manim.MathTex | manim.Tex
+
+# `manim.Text`, `manim.MathTex` and `manim.Tex` have slightly different text
+# rendering, so this function is used everywhere that there is a piece of text
+# so that every piece of text has the same text rendering.
+def text(t: str, font_size: float = manim.DEFAULT_FONT_SIZE) -> manimText:
+    return manim.Text(t, font_size=font_size)
+
 def intsToListOfVMobjects(tuple: sequence[int]) -> list[manim.VMobject]:
-    return [manim.Text(str(val)) for val in tuple]
+    return [text(str(val)) for val in tuple]
 
 def generateRegisterAllocationTable(*variables: str) -> registerAllocationTable:
     data: Mapping[str, registerPrioratiesAndLinks] = {}
@@ -53,8 +61,8 @@ def generateRegisterAllocationTable(*variables: str) -> registerAllocationTable:
         data,
         manim.MobjectTable(
             [intsToListOfVMobjects(val.prioraties) for val in data.values()],
-            col_labels=[manim.Text(f"r{i}") for i in range(number_of_registers)] + [manim.Text("Unkown")],
-            row_labels=[manim.Text(key) for key in data.keys()],
+            col_labels=[text(f"r{i}") for i in range(number_of_registers)] + [text("Unknown")],
+            row_labels=[text(key) for key in data.keys()],
         ),
     )
 
@@ -98,10 +106,10 @@ def arrangeInGrid(targetWidth: float, targetHeight: float, padding: float, *elem
         for i in range(0, numberOfRows):
             height += rowHeights[i]
         return width / height, (width, height, columnWidths, rowHeights)
-    _, (width, height, columnWidths, rowHeights) = iterateToSolution(targetAspectRatio, 0, len(elems), calculateAspectRatio)
+    aspectRatio, (width, height, columnWidths, rowHeights) = iterateToSolution(targetAspectRatio, 0, len(elems), calculateAspectRatio)
 
     # Expand or shrink the grid so it fits within `width` and `height`
-    if height * targetAspectRatio > width:
+    if targetAspectRatio > aspectRatio:
         scale = targetHeight / height
     else:
         scale = targetWidth / width
@@ -127,7 +135,9 @@ def generateRegisterAllocationGraph(scene: manim.Scene, *varNamesList: list[str]
         scene,
     )
     padding = 0.5
-    arrangeInGrid(out.scene.camera.frame_width-padding, out.scene.camera.frame_height-padding, padding, *[t.backingTable for t in out.tables])
+    width = convertToType(out.scene.camera.frame_width, float)
+    height = convertToType(out.scene.camera.frame_height, float)
+    arrangeInGrid(width-padding, height-padding, padding, *[t.backingTable for t in out.tables])
     out.scene.play(manim.LaggedStart(
         *[manim.FadeIn(table.backingTable) for table in out.tables],
         lag_ratio=0.5,
@@ -141,8 +151,6 @@ def getRowFromVarRef(graph: registerAllocationGraph, varRef: variableReference) 
 
 def getColFromRegister(table: registerAllocationTable, register: int) -> manim.VMobject:
     return table.backingTable.get_columns().submobjects[register+1]
-
-manimText: TypeAlias = manim.Text | manim.MathTex | manim.Tex
 
 @(dataclass)
 class number:
@@ -171,7 +179,7 @@ def addToTableCell(
 
     # Animation 1
     cellTarget = cell.backingMobject.copy()
-    operation = manim.Text("+" if added.value >= 0 else "-", font_size=cell.backingMobject.font_size)
+    operation = text("+" if added.value >= 0 else "-", font_size=cell.backingMobject.font_size)
     valueTarget = added.backingMobject.copy()
     valueTarget.height = cell.backingMobject.height
     rowItems = [cellTarget, operation, valueTarget]
@@ -184,7 +192,7 @@ def addToTableCell(
 
     # Animation 2
     group = manim.Group(*rowItems)
-    resultMobject = manim.Text(str(cell.value+added.value), font_size=cell.backingMobject.font_size)
+    resultMobject = text(str(cell.value+added.value), font_size=cell.backingMobject.font_size)
     resultMobject.move_to(group.get_center())
     graph.scene.play(manim.ReplacementTransform(group, resultMobject))
 
@@ -199,7 +207,7 @@ def createLink(fromVar: variableReference, toVar: variableReference, strength: i
     def createLinkFunc(graph: registerAllocationGraph) -> registerAllocationGraph:
         fromRowMobjects, _fromRowData = getRowFromVarRef(graph, fromVar)
         toRowMobjects, _toRowData = getRowFromVarRef(graph, toVar)
-        arrow = manim.LabeledArrow(str(strength), start=fromRowMobjects, end=toRowMobjects)
+        arrow = manim.LabeledLine(text(str(strength)), start=fromRowMobjects, end=toRowMobjects)
         fromLink = variableLink(toVar, strength, arrow)
         toLink = variableLink(fromVar, strength, arrow)
         graph.tables[fromVar.indexOfRegisterAllocationTable].data[fromVar.nameOfVariableWithinTable].links.append(fromLink)
